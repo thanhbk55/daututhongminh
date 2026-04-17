@@ -16,9 +16,12 @@ on:
         default: "normal"
 
 jobs:
-  download:
+  prepare:
     runs-on: ubuntu-latest
     outputs:
+      should_run: ${{ steps.sheet.outputs.should_run }}
+      sheet_row: ${{ steps.sheet.outputs.sheet_row }}
+      gdrive_rel_path: ${{ steps.sheet.outputs.gdrive_rel_path }}
       yt_title: ${{ steps.sheet.outputs.yt_title }}
       yt_description: ${{ steps.sheet.outputs.yt_description }}
       yt_privacy: ${{ steps.sheet.outputs.yt_privacy }}
@@ -28,13 +31,7 @@ jobs:
       GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
       GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
 
-      GDRIVE_FOLDER_ID: "1gQdENPC3hXdTrKLXzhigQw47zh3J9U6h"
-      OUT_PATH: "out/video.mp4"
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
@@ -85,7 +82,7 @@ jobs:
 
             const sheets = google.sheets({ version: "v4", auth: oauth2 });
             const spreadsheetId = "1b2quaeYZP2BNFKKrW5pMlO75NSA-IzVs04PZkLEZCHo";
-            const range = `aaa1!A${rowNumber}:D${rowNumber}`;
+            const range = `aaa1!A${rowNumber}:P${rowNumber}`;
 
             const res = await sheets.spreadsheets.values.get({
               spreadsheetId,
@@ -101,6 +98,18 @@ jobs:
             const ytTitle = String(row[1] || "").trim();     // B
             const desc = String(row[2] || "").trim();        // C
             const hashtag = String(row[3] || "").trim();     // D
+            const status = String(row[15] || "").trim();     // P
+
+            if (status !== "REVIEW OK") {
+              console.log(`Skip row ${rowNumber}: status is "${status}", expected "REVIEW OK"`);
+              setOutput("should_run", "false");
+              setOutput("sheet_row", rowNumber);
+              setOutput("gdrive_rel_path", "");
+              setOutput("yt_title", "");
+              setOutput("yt_description", "");
+              setOutput("yt_privacy", ytPrivacy);
+              return;
+            }
 
             if (!videoNumber) {
               throw new Error(`Column A (video number) is required at row ${rowNumber}`);
@@ -113,6 +122,8 @@ jobs:
             const gdriveRelPath = `video${videoNumber}/${fileName}`;
             const ytDescription = [desc, hashtag].filter(Boolean).join("\n\n");
 
+            setOutput("should_run", "true");
+            setOutput("sheet_row", rowNumber);
             setOutput("gdrive_rel_path", gdriveRelPath);
             setOutput("yt_title", ytTitle);
             setOutput("yt_description", ytDescription);
@@ -130,9 +141,34 @@ jobs:
           });
           NODE
 
+  download:
+    runs-on: ubuntu-latest
+    needs: prepare
+    if: ${{ needs.prepare.outputs.should_run == 'true' }}
+
+    env:
+      GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+      GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+      GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+
+      GDRIVE_FOLDER_ID: "1gQdENPC3hXdTrKLXzhigQw47zh3J9U6h"
+      OUT_PATH: "out/video.mp4"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install deps
+        run: npm i googleapis@^140
+
       - name: Download from Google Drive
         env:
-          GDRIVE_REL_PATH: ${{ steps.sheet.outputs.gdrive_rel_path }}
+          GDRIVE_REL_PATH: ${{ needs.prepare.outputs.gdrive_rel_path }}
         run: |
           node <<'NODE'
           const fs = require("fs");
@@ -258,7 +294,11 @@ jobs:
 
   upload:
     runs-on: ubuntu-latest
-    needs: download
+    needs: [prepare, download]
+    if: ${{ needs.prepare.outputs.should_run == 'true' }}
+
+    env:
+      SHEET_ROW: ${{ needs.prepare.outputs.sheet_row }}
 
     steps:
       - name: Download artifact
@@ -287,9 +327,9 @@ jobs:
           YT_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
           YT_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
 
-          YT_TITLE: ${{ needs.download.outputs.yt_title }}
-          YT_DESCRIPTION: ${{ needs.download.outputs.yt_description }}
-          YT_PRIVACY: ${{ needs.download.outputs.yt_privacy }}
+          YT_TITLE: ${{ needs.prepare.outputs.yt_title }}
+          YT_DESCRIPTION: ${{ needs.prepare.outputs.yt_description }}
+          YT_PRIVACY: ${{ needs.prepare.outputs.yt_privacy }}
         run: |
           node <<'NODE'
           const fs = require("fs");
@@ -332,8 +372,13 @@ jobs:
               },
             });
 
-            console.log("Uploaded video ID:", res.data.id);
-            console.log("URL:", `https://www.youtube.com/watch?v=${res.data.id}`);
+            const videoId = res.data.id;
+            const videoUrl = `https://www.youtube.com/watch?v=${videoId}`;
+
+            fs.appendFileSync(process.env.GITHUB_ENV, `VIDEO_URL=${videoUrl}\n`);
+
+            console.log("Uploaded video ID:", videoId);
+            console.log("URL:", videoUrl);
           }
 
           main().catch((e) => {
@@ -341,3 +386,63 @@ jobs:
             process.exit(1);
           });
           NODE
+
+      - name: Update Google Sheet (P=row => YOUTUBE DONE, W=row => URL)
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+          VIDEO_URL: ${{ env.VIDEO_URL }}
+        run: |
+          node <<'NODE'
+          const { google } = require("googleapis");
+
+          async function main() {
+            const clientId = process.env.GOOGLE_CLIENT_ID;
+            const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
+            const refreshToken = process.env.GOOGLE_REFRESH_TOKEN;
+            const row = String(process.env.SHEET_ROW || "").trim();
+            const videoUrl = String(process.env.VIDEO_URL || "").trim();
+
+            if (!row) throw new Error("Missing SHEET_ROW");
+            if (!videoUrl) throw new Error("Missing VIDEO_URL");
+
+            const oauth2 = new google.auth.OAuth2(clientId, clientSecret);
+            oauth2.setCredentials({ refresh_token: refreshToken });
+
+            const sheets = google.sheets({ version: "v4", auth: oauth2 });
+            const spreadsheetId = "1b2quaeYZP2BNFKKrW5pMlO75NSA-IzVs04PZkLEZCHo";
+
+            await sheets.spreadsheets.values.batchUpdate({
+              spreadsheetId,
+              requestBody: {
+                valueInputOption: "RAW",
+                data: [
+                  {
+                    range: `aaa1!P${row}`,
+                    values: [["YOUTUBE DONE"]],
+                  },
+                  {
+                    range: `aaa1!W${row}`,
+                    values: [[videoUrl]],
+                  },
+                ],
+              },
+            });
+
+            console.log(`Sheet updated: P${row}=YOUTUBE DONE, W${row}=${videoUrl}`);
+          }
+
+          main().catch((e) => {
+            console.error(e.response?.data || e);
+            process.exit(1);
+          });
+          NODE
+
+  skipped:
+    runs-on: ubuntu-latest
+    needs: prepare
+    if: ${{ needs.prepare.outputs.should_run != 'true' }}
+    steps:
+      - name: Skip message
+        run: echo "Skipped because column P is not REVIEW OK"
