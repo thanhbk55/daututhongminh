@@ -97,6 +97,8 @@ jobs:
 
           async function main() {
             let currentFolderId = rootFolderId;
+            console.log("currentFolderId", currentFolderId)
+            console.log("parts", parts)
 
             for (let i = 0; i < parts.length - 1; i++) {
               const folderName = parts[i];
