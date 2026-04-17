@@ -467,7 +467,7 @@ jobs:
                     values: [["YOUTUBE DONE"]],
                   },
                   {
-                    range: `${sheetName}!W${row}`,
+                    range: `${sheetName}!R${row}`,
                     values: [[videoUrl]],
                   },
                   {
