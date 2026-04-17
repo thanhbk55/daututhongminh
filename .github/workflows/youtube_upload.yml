@@ -7,17 +7,19 @@ on:
         description: "private|unlisted|public"
         required: false
         default: "private"
-      video_mode:
-        description: "normal|short"
-        required: false
-        default: "normal"
+
+  schedule:
+    - cron: '0 0 * * *' # 9:00 JST
 
 env:
   SPREADSHEET_ID: "1b2quaeYZP2BNFKKrW5pMlO75NSA-IzVs04PZkLEZCHo"
   SHEET_NAME: "aaa1"
   POINTER_CELL: "W2"
   GDRIVE_FOLDER_ID: "1gQdENPC3hXdTrKLXzhigQw47zh3J9U6h"
-  OUT_PATH: "out/video.mp4"
+
+  OUT_DIR: "out"
+  NORMAL_PATH: "out/youtube.mp4"
+  SHORT_PATH: "out/tiktok.mp4"
 
 jobs:
   prepare:
@@ -26,7 +28,8 @@ jobs:
       should_run: ${{ steps.sheet.outputs.should_run }}
       should_advance: ${{ steps.sheet.outputs.should_advance }}
       sheet_row: ${{ steps.sheet.outputs.sheet_row }}
-      gdrive_rel_path: ${{ steps.sheet.outputs.gdrive_rel_path }}
+      gdrive_rel_path_normal: ${{ steps.sheet.outputs.gdrive_rel_path_normal }}
+      gdrive_rel_path_short: ${{ steps.sheet.outputs.gdrive_rel_path_short }}
       yt_title: ${{ steps.sheet.outputs.yt_title }}
       yt_description: ${{ steps.sheet.outputs.yt_description }}
       yt_privacy: ${{ steps.sheet.outputs.yt_privacy }}
@@ -48,7 +51,6 @@ jobs:
       - name: Read current row from Google Sheet pointer
         id: sheet
         env:
-          VIDEO_MODE: ${{ inputs.video_mode }}
           YT_PRIVACY_INPUT: ${{ inputs.yt_privacy }}
         run: |
           node <<'NODE'
@@ -67,7 +69,6 @@ jobs:
             const spreadsheetId = process.env.SPREADSHEET_ID;
             const sheetName = process.env.SHEET_NAME;
             const pointerCell = process.env.POINTER_CELL;
-            const videoMode = String(process.env.VIDEO_MODE || "normal").trim().toLowerCase();
             const ytPrivacy = String(process.env.YT_PRIVACY_INPUT || "private").trim().toLowerCase();
 
             if (!clientId || !clientSecret || !refreshToken) {
@@ -77,9 +78,6 @@ jobs:
             if (!sheetName) throw new Error("Missing SHEET_NAME");
             if (!pointerCell) throw new Error("Missing POINTER_CELL");
 
-            if (!["normal", "short"].includes(videoMode)) {
-              throw new Error(`Invalid video_mode: ${videoMode}`);
-            }
             if (!["private", "unlisted", "public"].includes(ytPrivacy)) {
               throw new Error(`Invalid yt_privacy: ${ytPrivacy}`);
             }
@@ -89,16 +87,13 @@ jobs:
 
             const sheets = google.sheets({ version: "v4", auth: oauth2 });
 
-            // Read pointer from fixed cell W2
             const pointerRes = await sheets.spreadsheets.values.get({
               spreadsheetId,
               range: `${sheetName}!${pointerCell}`,
             });
 
             const rowNumber = String(pointerRes.data.values?.[0]?.[0] || "").trim();
-            if (!rowNumber) {
-              throw new Error(`Pointer cell ${sheetName}!${pointerCell} is empty`);
-            }
+            if (!rowNumber) throw new Error(`Pointer cell ${sheetName}!${pointerCell} is empty`);
             if (!/^\d+$/.test(rowNumber)) {
               throw new Error(`Invalid row number in ${sheetName}!${pointerCell}: ${rowNumber}`);
             }
@@ -113,9 +108,7 @@ jobs:
             });
 
             const row = rowRes.data.values?.[0];
-            if (!row) {
-              throw new Error(`No data found at row ${rowNumber}`);
-            }
+            if (!row) throw new Error(`No data found at row ${rowNumber}`);
 
             const videoNumber = String(row[0] || "").trim(); // A
             const ytTitle = String(row[1] || "").trim();     // B
@@ -128,7 +121,8 @@ jobs:
               setOutput("should_run", "false");
               setOutput("should_advance", "true");
               setOutput("sheet_row", rowNumber);
-              setOutput("gdrive_rel_path", "");
+              setOutput("gdrive_rel_path_normal", "");
+              setOutput("gdrive_rel_path_short", "");
               setOutput("yt_title", "");
               setOutput("yt_description", "");
               setOutput("yt_privacy", ytPrivacy);
@@ -140,35 +134,33 @@ jobs:
               setOutput("should_run", "false");
               setOutput("should_advance", "false");
               setOutput("sheet_row", rowNumber);
-              setOutput("gdrive_rel_path", "");
+              setOutput("gdrive_rel_path_normal", "");
+              setOutput("gdrive_rel_path_short", "");
               setOutput("yt_title", "");
               setOutput("yt_description", "");
               setOutput("yt_privacy", ytPrivacy);
               return;
             }
 
-            if (!videoNumber) {
-              throw new Error(`Column A (video number) is required at row ${rowNumber}`);
-            }
-            if (!ytTitle) {
-              throw new Error(`Column B (video title) is required at row ${rowNumber}`);
-            }
+            if (!videoNumber) throw new Error(`Column A (video number) is required at row ${rowNumber}`);
+            if (!ytTitle) throw new Error(`Column B (video title) is required at row ${rowNumber}`);
 
-            const fileName = videoMode === "short" ? "tiktok.mp4" : "youtube.mp4";
-            const gdriveRelPath = `video${videoNumber}/${fileName}`;
+            const gdriveRelPathNormal = `video${videoNumber}/youtube.mp4`;
+            const gdriveRelPathShort = `video${videoNumber}/tiktok.mp4`;
             const ytDescription = [desc, hashtag].filter(Boolean).join("\n\n");
 
             setOutput("should_run", "true");
             setOutput("should_advance", "false");
             setOutput("sheet_row", rowNumber);
-            setOutput("gdrive_rel_path", gdriveRelPath);
+            setOutput("gdrive_rel_path_normal", gdriveRelPathNormal);
+            setOutput("gdrive_rel_path_short", gdriveRelPathShort);
             setOutput("yt_title", ytTitle);
             setOutput("yt_description", ytDescription);
             setOutput("yt_privacy", ytPrivacy);
 
             console.log("Pointer row:", rowNumber);
-            console.log("video_mode:", videoMode);
-            console.log("gdrive_rel_path:", gdriveRelPath);
+            console.log("gdrive_rel_path_normal:", gdriveRelPathNormal);
+            console.log("gdrive_rel_path_short:", gdriveRelPathShort);
             console.log("yt_title:", ytTitle);
           }
 
@@ -200,9 +192,10 @@ jobs:
       - name: Install deps
         run: npm i googleapis@^140
 
-      - name: Download from Google Drive
+      - name: Download both videos from Google Drive
         env:
-          GDRIVE_REL_PATH: ${{ needs.prepare.outputs.gdrive_rel_path }}
+          GDRIVE_REL_PATH_NORMAL: ${{ needs.prepare.outputs.gdrive_rel_path_normal }}
+          GDRIVE_REL_PATH_SHORT: ${{ needs.prepare.outputs.gdrive_rel_path_short }}
         run: |
           node <<'NODE'
           const fs = require("fs");
@@ -212,19 +205,20 @@ jobs:
           const clientId = process.env.GOOGLE_CLIENT_ID;
           const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
           const refreshToken = process.env.GOOGLE_REFRESH_TOKEN;
-
           const rootFolderId = process.env.GDRIVE_FOLDER_ID;
-          const relPath = process.env.GDRIVE_REL_PATH;
-          const outPath = process.env.OUT_PATH || "out/video.mp4";
+
+          const normalRelPath = process.env.GDRIVE_REL_PATH_NORMAL;
+          const shortRelPath = process.env.GDRIVE_REL_PATH_SHORT;
+
+          const normalOutPath = process.env.NORMAL_PATH || "out/youtube.mp4";
+          const shortOutPath = process.env.SHORT_PATH || "out/tiktok.mp4";
 
           if (!clientId || !clientSecret || !refreshToken) {
             throw new Error("Missing GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET / GOOGLE_REFRESH_TOKEN");
           }
           if (!rootFolderId) throw new Error("Missing GDRIVE_FOLDER_ID");
-          if (!relPath) throw new Error("Missing gdrive_rel_path");
-
-          const parts = relPath.split("/").filter(Boolean);
-          if (parts.length < 1) throw new Error(`Invalid gdrive_rel_path: ${relPath}`);
+          if (!normalRelPath) throw new Error("Missing gdrive_rel_path_normal");
+          if (!shortRelPath) throw new Error("Missing gdrive_rel_path_short");
 
           const oauth2 = new google.auth.OAuth2(clientId, clientSecret);
           oauth2.setCredentials({ refresh_token: refreshToken });
@@ -247,7 +241,10 @@ jobs:
             }) || null;
           }
 
-          async function main() {
+          async function resolveFile(relPath) {
+            const parts = relPath.split("/").filter(Boolean);
+            if (parts.length < 1) throw new Error(`Invalid gdrive_rel_path: ${relPath}`);
+
             let currentFolderId = rootFolderId;
 
             for (let i = 0; i < parts.length - 1; i++) {
@@ -269,6 +266,11 @@ jobs:
               throw new Error(`File not found: ${fileName} under parent ${currentFolderId} for relPath=${relPath}`);
             }
 
+            return file;
+          }
+
+          async function downloadOne(relPath, outPath) {
+            const file = await resolveFile(relPath);
             fs.mkdirSync(path.dirname(outPath), { recursive: true });
             const dest = fs.createWriteStream(outPath);
 
@@ -285,9 +287,14 @@ jobs:
             });
 
             const stat = fs.statSync(outPath);
-            console.log("Downloaded OK:", outPath);
-            console.log("Drive fileId:", file.id);
-            console.log("Size:", stat.size);
+            console.log("Downloaded OK:", outPath, "fileId:", file.id, "size:", stat.size);
+          }
+
+          async function main() {
+            await Promise.all([
+              downloadOne(normalRelPath, normalOutPath),
+              downloadOne(shortRelPath, shortOutPath),
+            ]);
           }
 
           main().catch((e) => {
@@ -296,22 +303,22 @@ jobs:
           });
           NODE
 
-      - name: Verify file
+      - name: Verify files
         run: |
           ls -lah out
-          file out/video.mp4 || true
+          file out/youtube.mp4 || true
+          file out/tiktok.mp4 || true
 
-      - name: Trim video if mode=short (<= 179s)
-        if: ${{ inputs.video_mode == 'short' }}
+      - name: Trim short video (<= 179s)
         run: |
           set -euo pipefail
           sudo apt-get update && sudo apt-get install -y ffmpeg
 
-          IN="out/video.mp4"
-          OUT="out/video_trim.mp4"
+          IN="out/tiktok.mp4"
+          OUT="out/tiktok_trim.mp4"
           TRIM_SEC="179"
 
-          echo "Trim to ${TRIM_SEC}s for Shorts..."
+          echo "Trim short video to ${TRIM_SEC}s..."
           ffmpeg -hide_banner -y -i "$IN" -t "$TRIM_SEC" -c copy "$OUT" || \
           ffmpeg -hide_banner -y -i "$IN" -t "$TRIM_SEC" -c:v libx264 -preset veryfast -crf 23 -c:a aac -b:a 128k "$OUT"
 
@@ -323,8 +330,10 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: video-file
-          path: out/video.mp4
+          name: video-files
+          path: |
+            out/youtube.mp4
+            out/tiktok.mp4
 
   upload:
     runs-on: ubuntu-latest
@@ -338,14 +347,15 @@ jobs:
       - name: Download artifact
         uses: actions/download-artifact@v4
         with:
-          name: video-file
+          name: video-files
           path: out
 
       - name: Verify artifact
         run: |
           find . -maxdepth 4 -type f | sort
           ls -lah out || true
-          file out/video.mp4 || true
+          file out/youtube.mp4 || true
+          file out/tiktok.mp4 || true
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -355,7 +365,7 @@ jobs:
       - name: Install deps
         run: npm i googleapis@^140
 
-      - name: Upload to YouTube (Node stream, no OOM)
+      - name: Upload both videos to YouTube
         env:
           YT_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
           YT_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
@@ -382,37 +392,46 @@ jobs:
             oauth2.setCredentials({ refresh_token: process.env.YT_REFRESH_TOKEN });
 
             const youtube = google.youtube({ version: "v3", auth: oauth2 });
+            const title = process.env.YT_TITLE;
+            const description = process.env.YT_DESCRIPTION;
 
-            const videoPath = "out/video.mp4";
-            if (!fs.existsSync(videoPath)) {
-              throw new Error(`Video not found: ${videoPath}`);
+            async function uploadOne(videoPath, titleSuffix = "") {
+              if (!fs.existsSync(videoPath)) {
+                throw new Error(`Video not found: ${videoPath}`);
+              }
+
+              const res = await youtube.videos.insert({
+                part: ["snippet", "status"],
+                notifySubscribers: false,
+                requestBody: {
+                  snippet: {
+                    title: `${title}${titleSuffix}`,
+                    description,
+                    categoryId: "22",
+                  },
+                  status: {
+                    privacyStatus: privacy,
+                  },
+                },
+                media: {
+                  body: fs.createReadStream(videoPath),
+                },
+              });
+
+              const videoId = res.data.id;
+              return `https://www.youtube.com/watch?v=${videoId}`;
             }
 
-            const res = await youtube.videos.insert({
-              part: ["snippet", "status"],
-              notifySubscribers: false,
-              requestBody: {
-                snippet: {
-                  title: process.env.YT_TITLE,
-                  description: process.env.YT_DESCRIPTION,
-                  categoryId: "22",
-                },
-                status: {
-                  privacyStatus: privacy,
-                },
-              },
-              media: {
-                body: fs.createReadStream(videoPath),
-              },
-            });
+            const [normalUrl, shortUrl] = await Promise.all([
+              uploadOne("out/youtube.mp4", ""),
+              uploadOne("out/tiktok.mp4", " #shorts"),
+            ]);
 
-            const videoId = res.data.id;
-            const videoUrl = `https://www.youtube.com/watch?v=${videoId}`;
+            fs.appendFileSync(process.env.GITHUB_ENV, `NORMAL_VIDEO_URL=${normalUrl}\n`);
+            fs.appendFileSync(process.env.GITHUB_ENV, `SHORT_VIDEO_URL=${shortUrl}\n`);
 
-            fs.appendFileSync(process.env.GITHUB_ENV, `VIDEO_URL=${videoUrl}\n`);
-
-            console.log("Uploaded video ID:", videoId);
-            console.log("URL:", videoUrl);
+            console.log("Normal URL:", normalUrl);
+            console.log("Short URL:", shortUrl);
           }
 
           main().catch((e) => {
@@ -421,12 +440,13 @@ jobs:
           });
           NODE
 
-      - name: Update Google Sheet after upload
+      - name: Update Google Sheet after both uploads
         env:
           GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
           GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
           GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
-          VIDEO_URL: ${{ env.VIDEO_URL }}
+          NORMAL_VIDEO_URL: ${{ env.NORMAL_VIDEO_URL }}
+          SHORT_VIDEO_URL: ${{ env.SHORT_VIDEO_URL }}
         run: |
           node <<'NODE'
           const { google } = require("googleapis");
@@ -439,10 +459,12 @@ jobs:
             const sheetName = process.env.SHEET_NAME;
             const pointerCell = process.env.POINTER_CELL;
             const row = String(process.env.SHEET_ROW || "").trim();
-            const videoUrl = String(process.env.VIDEO_URL || "").trim();
+            const normalVideoUrl = String(process.env.NORMAL_VIDEO_URL || "").trim();
+            const shortVideoUrl = String(process.env.SHORT_VIDEO_URL || "").trim();
 
             if (!row) throw new Error("Missing SHEET_ROW");
-            if (!videoUrl) throw new Error("Missing VIDEO_URL");
+            if (!normalVideoUrl) throw new Error("Missing NORMAL_VIDEO_URL");
+            if (!shortVideoUrl) throw new Error("Missing SHORT_VIDEO_URL");
 
             const oauth2 = new google.auth.OAuth2(clientId, clientSecret);
             oauth2.setCredentials({ refresh_token: refreshToken });
@@ -468,7 +490,11 @@ jobs:
                   },
                   {
                     range: `${sheetName}!R${row}`,
-                    values: [[videoUrl]],
+                    values: [[normalVideoUrl]],
+                  },
+                  {
+                    range: `${sheetName}!S${row}`,
+                    values: [[shortVideoUrl]],
                   },
                   {
                     range: `${sheetName}!${pointerCell}`,
@@ -478,7 +504,7 @@ jobs:
               },
             });
 
-            console.log(`Sheet updated: P${row}=YOUTUBE DONE, W${row}=${videoUrl}, ${pointerCell}=${nextPointer}`);
+            console.log(`Sheet updated: P${row}=YOUTUBE DONE, R${row}=${normalVideoUrl}, S${row}=${shortVideoUrl}, ${pointerCell}=${nextPointer}`);
           }
 
           main().catch((e) => {
@@ -555,4 +581,4 @@ jobs:
     if: ${{ needs.prepare.outputs.should_run != 'true' && needs.prepare.outputs.should_advance != 'true' }}
     steps:
       - name: Skip message
-        run: echo "Skipped because current row status is not REVIEW OK"
+        run: echo "Skipped because current row status is not YOUTUBE OK"
