@@ -1,0 +1,558 @@
+name: YouTube Upload
+
+on:
+  workflow_dispatch:
+    inputs:
+      yt_privacy:
+        description: "private|unlisted|public"
+        required: false
+        default: "private"
+      video_mode:
+        description: "normal|short"
+        required: false
+        default: "normal"
+
+env:
+  SPREADSHEET_ID: "1b2quaeYZP2BNFKKrW5pMlO75NSA-IzVs04PZkLEZCHo"
+  SHEET_NAME: "aaa1"
+  POINTER_CELL: "W2"
+  GDRIVE_FOLDER_ID: "1gQdENPC3hXdTrKLXzhigQw47zh3J9U6h"
+  OUT_PATH: "out/video.mp4"
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      should_run: ${{ steps.sheet.outputs.should_run }}
+      should_advance: ${{ steps.sheet.outputs.should_advance }}
+      sheet_row: ${{ steps.sheet.outputs.sheet_row }}
+      gdrive_rel_path: ${{ steps.sheet.outputs.gdrive_rel_path }}
+      yt_title: ${{ steps.sheet.outputs.yt_title }}
+      yt_description: ${{ steps.sheet.outputs.yt_description }}
+      yt_privacy: ${{ steps.sheet.outputs.yt_privacy }}
+
+    env:
+      GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+      GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+      GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+
+    steps:
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install deps
+        run: npm i googleapis@^140
+
+      - name: Read current row from Google Sheet pointer
+        id: sheet
+        env:
+          VIDEO_MODE: ${{ inputs.video_mode }}
+          YT_PRIVACY_INPUT: ${{ inputs.yt_privacy }}
+        run: |
+          node <<'NODE'
+          const fs = require("fs");
+          const { google } = require("googleapis");
+
+          function setOutput(name, value) {
+            const safe = String(value ?? "").replace(/\r/g, "");
+            fs.appendFileSync(process.env.GITHUB_OUTPUT, `${name}<<__EOF__\n${safe}\n__EOF__\n`);
+          }
+
+          async function main() {
+            const clientId = process.env.GOOGLE_CLIENT_ID;
+            const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
+            const refreshToken = process.env.GOOGLE_REFRESH_TOKEN;
+            const spreadsheetId = process.env.SPREADSHEET_ID;
+            const sheetName = process.env.SHEET_NAME;
+            const pointerCell = process.env.POINTER_CELL;
+            const videoMode = String(process.env.VIDEO_MODE || "normal").trim().toLowerCase();
+            const ytPrivacy = String(process.env.YT_PRIVACY_INPUT || "private").trim().toLowerCase();
+
+            if (!clientId || !clientSecret || !refreshToken) {
+              throw new Error("Missing GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET / GOOGLE_REFRESH_TOKEN");
+            }
+            if (!spreadsheetId) throw new Error("Missing SPREADSHEET_ID");
+            if (!sheetName) throw new Error("Missing SHEET_NAME");
+            if (!pointerCell) throw new Error("Missing POINTER_CELL");
+
+            if (!["normal", "short"].includes(videoMode)) {
+              throw new Error(`Invalid video_mode: ${videoMode}`);
+            }
+            if (!["private", "unlisted", "public"].includes(ytPrivacy)) {
+              throw new Error(`Invalid yt_privacy: ${ytPrivacy}`);
+            }
+
+            const oauth2 = new google.auth.OAuth2(clientId, clientSecret);
+            oauth2.setCredentials({ refresh_token: refreshToken });
+
+            const sheets = google.sheets({ version: "v4", auth: oauth2 });
+
+            // Read pointer from fixed cell W2
+            const pointerRes = await sheets.spreadsheets.values.get({
+              spreadsheetId,
+              range: `${sheetName}!${pointerCell}`,
+            });
+
+            const rowNumber = String(pointerRes.data.values?.[0]?.[0] || "").trim();
+            if (!rowNumber) {
+              throw new Error(`Pointer cell ${sheetName}!${pointerCell} is empty`);
+            }
+            if (!/^\d+$/.test(rowNumber)) {
+              throw new Error(`Invalid row number in ${sheetName}!${pointerCell}: ${rowNumber}`);
+            }
+            if (Number(rowNumber) < 1) {
+              throw new Error(`Row number in ${sheetName}!${pointerCell} must be >= 1: ${rowNumber}`);
+            }
+
+            const rowRange = `${sheetName}!A${rowNumber}:P${rowNumber}`;
+            const rowRes = await sheets.spreadsheets.values.get({
+              spreadsheetId,
+              range: rowRange,
+            });
+
+            const row = rowRes.data.values?.[0];
+            if (!row) {
+              throw new Error(`No data found at row ${rowNumber}`);
+            }
+
+            const videoNumber = String(row[0] || "").trim(); // A
+            const ytTitle = String(row[1] || "").trim();     // B
+            const desc = String(row[2] || "").trim();        // C
+            const hashtag = String(row[3] || "").trim();     // D
+            const status = String(row[15] || "").trim();     // P
+
+            if (status === "SKIP") {
+              console.log(`Skip row ${rowNumber}: status is SKIP, will advance pointer`);
+              setOutput("should_run", "false");
+              setOutput("should_advance", "true");
+              setOutput("sheet_row", rowNumber);
+              setOutput("gdrive_rel_path", "");
+              setOutput("yt_title", "");
+              setOutput("yt_description", "");
+              setOutput("yt_privacy", ytPrivacy);
+              return;
+            }
+
+            if (status !== "YOUTUBE OK") {
+              console.log(`Skip row ${rowNumber}: status is "${status}", expected "YOUTUBE OK"`);
+              setOutput("should_run", "false");
+              setOutput("should_advance", "false");
+              setOutput("sheet_row", rowNumber);
+              setOutput("gdrive_rel_path", "");
+              setOutput("yt_title", "");
+              setOutput("yt_description", "");
+              setOutput("yt_privacy", ytPrivacy);
+              return;
+            }
+
+            if (!videoNumber) {
+              throw new Error(`Column A (video number) is required at row ${rowNumber}`);
+            }
+            if (!ytTitle) {
+              throw new Error(`Column B (video title) is required at row ${rowNumber}`);
+            }
+
+            const fileName = videoMode === "short" ? "tiktok.mp4" : "youtube.mp4";
+            const gdriveRelPath = `video${videoNumber}/${fileName}`;
+            const ytDescription = [desc, hashtag].filter(Boolean).join("\n\n");
+
+            setOutput("should_run", "true");
+            setOutput("should_advance", "false");
+            setOutput("sheet_row", rowNumber);
+            setOutput("gdrive_rel_path", gdriveRelPath);
+            setOutput("yt_title", ytTitle);
+            setOutput("yt_description", ytDescription);
+            setOutput("yt_privacy", ytPrivacy);
+
+            console.log("Pointer row:", rowNumber);
+            console.log("video_mode:", videoMode);
+            console.log("gdrive_rel_path:", gdriveRelPath);
+            console.log("yt_title:", ytTitle);
+          }
+
+          main().catch((e) => {
+            console.error(e);
+            process.exit(1);
+          });
+          NODE
+
+  download:
+    runs-on: ubuntu-latest
+    needs: prepare
+    if: ${{ needs.prepare.outputs.should_run == 'true' }}
+
+    env:
+      GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+      GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+      GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install deps
+        run: npm i googleapis@^140
+
+      - name: Download from Google Drive
+        env:
+          GDRIVE_REL_PATH: ${{ needs.prepare.outputs.gdrive_rel_path }}
+        run: |
+          node <<'NODE'
+          const fs = require("fs");
+          const path = require("path");
+          const { google } = require("googleapis");
+
+          const clientId = process.env.GOOGLE_CLIENT_ID;
+          const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
+          const refreshToken = process.env.GOOGLE_REFRESH_TOKEN;
+
+          const rootFolderId = process.env.GDRIVE_FOLDER_ID;
+          const relPath = process.env.GDRIVE_REL_PATH;
+          const outPath = process.env.OUT_PATH || "out/video.mp4";
+
+          if (!clientId || !clientSecret || !refreshToken) {
+            throw new Error("Missing GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET / GOOGLE_REFRESH_TOKEN");
+          }
+          if (!rootFolderId) throw new Error("Missing GDRIVE_FOLDER_ID");
+          if (!relPath) throw new Error("Missing gdrive_rel_path");
+
+          const parts = relPath.split("/").filter(Boolean);
+          if (parts.length < 1) throw new Error(`Invalid gdrive_rel_path: ${relPath}`);
+
+          const oauth2 = new google.auth.OAuth2(clientId, clientSecret);
+          oauth2.setCredentials({ refresh_token: refreshToken });
+          const drive = google.drive({ version: "v3", auth: oauth2 });
+
+          async function findChild(parentId, name, mimeType) {
+            const res = await drive.files.list({
+              q: `'${parentId}' in parents and trashed = false`,
+              fields: "files(id,name,mimeType)",
+              pageSize: 100,
+              supportsAllDrives: true,
+              includeItemsFromAllDrives: true,
+            });
+
+            const files = res.data.files || [];
+            return files.find((f) => {
+              if (f.name !== name) return false;
+              if (mimeType && f.mimeType !== mimeType) return false;
+              return true;
+            }) || null;
+          }
+
+          async function main() {
+            let currentFolderId = rootFolderId;
+
+            for (let i = 0; i < parts.length - 1; i++) {
+              const folderName = parts[i];
+              const folder = await findChild(
+                currentFolderId,
+                folderName,
+                "application/vnd.google-apps.folder"
+              );
+              if (!folder) {
+                throw new Error(`Folder not found: ${folderName} under parent ${currentFolderId} for relPath=${relPath}`);
+              }
+              currentFolderId = folder.id;
+            }
+
+            const fileName = parts[parts.length - 1];
+            const file = await findChild(currentFolderId, fileName, null);
+            if (!file) {
+              throw new Error(`File not found: ${fileName} under parent ${currentFolderId} for relPath=${relPath}`);
+            }
+
+            fs.mkdirSync(path.dirname(outPath), { recursive: true });
+            const dest = fs.createWriteStream(outPath);
+
+            const res = await drive.files.get(
+              { fileId: file.id, alt: "media", supportsAllDrives: true },
+              { responseType: "stream" }
+            );
+
+            await new Promise((resolve, reject) => {
+              res.data.on("error", reject);
+              dest.on("finish", resolve);
+              dest.on("error", reject);
+              res.data.pipe(dest);
+            });
+
+            const stat = fs.statSync(outPath);
+            console.log("Downloaded OK:", outPath);
+            console.log("Drive fileId:", file.id);
+            console.log("Size:", stat.size);
+          }
+
+          main().catch((e) => {
+            console.error(e);
+            process.exit(1);
+          });
+          NODE
+
+      - name: Verify file
+        run: |
+          ls -lah out
+          file out/video.mp4 || true
+
+      - name: Trim video if mode=short (<= 179s)
+        if: ${{ inputs.video_mode == 'short' }}
+        run: |
+          set -euo pipefail
+          sudo apt-get update && sudo apt-get install -y ffmpeg
+
+          IN="out/video.mp4"
+          OUT="out/video_trim.mp4"
+          TRIM_SEC="179"
+
+          echo "Trim to ${TRIM_SEC}s for Shorts..."
+          ffmpeg -hide_banner -y -i "$IN" -t "$TRIM_SEC" -c copy "$OUT" || \
+          ffmpeg -hide_banner -y -i "$IN" -t "$TRIM_SEC" -c:v libx264 -preset veryfast -crf 23 -c:a aac -b:a 128k "$OUT"
+
+          mv -f "$OUT" "$IN"
+
+          ffprobe -v error -show_entries format=duration -of default=nw=1:nk=1 "$IN" || true
+          ls -lah out
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: video-file
+          path: out/video.mp4
+
+  upload:
+    runs-on: ubuntu-latest
+    needs: [prepare, download]
+    if: ${{ needs.prepare.outputs.should_run == 'true' }}
+
+    env:
+      SHEET_ROW: ${{ needs.prepare.outputs.sheet_row }}
+
+    steps:
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: video-file
+          path: out
+
+      - name: Verify artifact
+        run: |
+          find . -maxdepth 4 -type f | sort
+          ls -lah out || true
+          file out/video.mp4 || true
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install deps
+        run: npm i googleapis@^140
+
+      - name: Upload to YouTube (Node stream, no OOM)
+        env:
+          YT_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          YT_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          YT_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+
+          YT_TITLE: ${{ needs.prepare.outputs.yt_title }}
+          YT_DESCRIPTION: ${{ needs.prepare.outputs.yt_description }}
+          YT_PRIVACY: ${{ needs.prepare.outputs.yt_privacy }}
+        run: |
+          node <<'NODE'
+          const fs = require("fs");
+          const { google } = require("googleapis");
+
+          async function main() {
+            let privacy = (process.env.YT_PRIVACY || "private").toLowerCase();
+            if (!["private", "unlisted", "public"].includes(privacy)) {
+              throw new Error(`Invalid yt_privacy: ${privacy}`);
+            }
+
+            const oauth2 = new google.auth.OAuth2(
+              process.env.YT_CLIENT_ID,
+              process.env.YT_CLIENT_SECRET
+            );
+            oauth2.setCredentials({ refresh_token: process.env.YT_REFRESH_TOKEN });
+
+            const youtube = google.youtube({ version: "v3", auth: oauth2 });
+
+            const videoPath = "out/video.mp4";
+            if (!fs.existsSync(videoPath)) {
+              throw new Error(`Video not found: ${videoPath}`);
+            }
+
+            const res = await youtube.videos.insert({
+              part: ["snippet", "status"],
+              notifySubscribers: false,
+              requestBody: {
+                snippet: {
+                  title: process.env.YT_TITLE,
+                  description: process.env.YT_DESCRIPTION,
+                  categoryId: "22",
+                },
+                status: {
+                  privacyStatus: privacy,
+                },
+              },
+              media: {
+                body: fs.createReadStream(videoPath),
+              },
+            });
+
+            const videoId = res.data.id;
+            const videoUrl = `https://www.youtube.com/watch?v=${videoId}`;
+
+            fs.appendFileSync(process.env.GITHUB_ENV, `VIDEO_URL=${videoUrl}\n`);
+
+            console.log("Uploaded video ID:", videoId);
+            console.log("URL:", videoUrl);
+          }
+
+          main().catch((e) => {
+            console.error(e);
+            process.exit(1);
+          });
+          NODE
+
+      - name: Update Google Sheet after upload
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+          VIDEO_URL: ${{ env.VIDEO_URL }}
+        run: |
+          node <<'NODE'
+          const { google } = require("googleapis");
+
+          async function main() {
+            const clientId = process.env.GOOGLE_CLIENT_ID;
+            const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
+            const refreshToken = process.env.GOOGLE_REFRESH_TOKEN;
+            const spreadsheetId = process.env.SPREADSHEET_ID;
+            const sheetName = process.env.SHEET_NAME;
+            const pointerCell = process.env.POINTER_CELL;
+            const row = String(process.env.SHEET_ROW || "").trim();
+            const videoUrl = String(process.env.VIDEO_URL || "").trim();
+
+            if (!row) throw new Error("Missing SHEET_ROW");
+            if (!videoUrl) throw new Error("Missing VIDEO_URL");
+
+            const oauth2 = new google.auth.OAuth2(clientId, clientSecret);
+            oauth2.setCredentials({ refresh_token: refreshToken });
+
+            const sheets = google.sheets({ version: "v4", auth: oauth2 });
+
+            const pointerRes = await sheets.spreadsheets.values.get({
+              spreadsheetId,
+              range: `${sheetName}!${pointerCell}`,
+            });
+
+            const currentPointer = Number(pointerRes.data.values?.[0]?.[0] || 0);
+            const nextPointer = currentPointer + 1;
+
+            await sheets.spreadsheets.values.batchUpdate({
+              spreadsheetId,
+              requestBody: {
+                valueInputOption: "RAW",
+                data: [
+                  {
+                    range: `${sheetName}!P${row}`,
+                    values: [["YOUTUBE DONE"]],
+                  },
+                  {
+                    range: `${sheetName}!R${row}`,
+                    values: [[videoUrl]],
+                  },
+                  {
+                    range: `${sheetName}!${pointerCell}`,
+                    values: [[nextPointer]],
+                  },
+                ],
+              },
+            });
+
+            console.log(`Sheet updated: P${row}=YOUTUBE DONE, W${row}=${videoUrl}, ${pointerCell}=${nextPointer}`);
+          }
+
+          main().catch((e) => {
+            console.error(e.response?.data || e);
+            process.exit(1);
+          });
+          NODE
+
+  skip_and_advance:
+    runs-on: ubuntu-latest
+    needs: prepare
+    if: ${{ needs.prepare.outputs.should_run != 'true' && needs.prepare.outputs.should_advance == 'true' }}
+
+    env:
+      GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+      GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+      GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+
+    steps:
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install deps
+        run: npm i googleapis@^140
+
+      - name: Advance pointer because status is SKIP
+        run: |
+          node <<'NODE'
+          const { google } = require("googleapis");
+
+          async function main() {
+            const oauth2 = new google.auth.OAuth2(
+              process.env.GOOGLE_CLIENT_ID,
+              process.env.GOOGLE_CLIENT_SECRET
+            );
+            oauth2.setCredentials({ refresh_token: process.env.GOOGLE_REFRESH_TOKEN });
+
+            const sheets = google.sheets({ version: "v4", auth: oauth2 });
+            const spreadsheetId = process.env.SPREADSHEET_ID;
+            const sheetName = process.env.SHEET_NAME;
+            const pointerCell = process.env.POINTER_CELL;
+
+            const pointerRes = await sheets.spreadsheets.values.get({
+              spreadsheetId,
+              range: `${sheetName}!${pointerCell}`,
+            });
+
+            const currentPointer = Number(pointerRes.data.values?.[0]?.[0] || 0);
+            const nextPointer = currentPointer + 1;
+
+            await sheets.spreadsheets.values.update({
+              spreadsheetId,
+              range: `${sheetName}!${pointerCell}`,
+              valueInputOption: "RAW",
+              requestBody: {
+                values: [[nextPointer]],
+              },
+            });
+
+            console.log(`Status is SKIP, advanced ${pointerCell} from ${currentPointer} to ${nextPointer}`);
+          }
+
+          main().catch((e) => {
+            console.error(e.response?.data || e);
+            process.exit(1);
+          });
+          NODE
+
+  skipped:
+    runs-on: ubuntu-latest
+    needs: prepare
+    if: ${{ needs.prepare.outputs.should_run != 'true' && needs.prepare.outputs.should_advance != 'true' }}
+    steps:
+      - name: Skip message
+        run: echo "Skipped because current row status is not REVIEW OK"
