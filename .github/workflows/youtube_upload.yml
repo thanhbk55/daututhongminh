@@ -95,10 +95,26 @@ jobs:
             return res.data.files?.[0] || null;
           }
 
+          async function listChildren(parentId) {
+            const res = await drive.files.list({
+              q: `'${parentId}' in parents and trashed = false`,
+              fields: "files(id,name,mimeType)",
+              pageSize: 100,
+              supportsAllDrives: true,
+              includeItemsFromAllDrives: true,
+            });
+          
+            console.log("Children under root:");
+            for (const f of res.data.files || []) {
+              console.log(`- ${f.name} | ${f.mimeType} | ${f.id}`);
+            }
+          }
+
           async function main() {
             let currentFolderId = rootFolderId;
             console.log("currentFolderId", currentFolderId)
             console.log("parts", parts)
+            await listChildren(rootFolderId);
 
             for (let i = 0; i < parts.length - 1; i++) {
               const folderName = parts[i];
