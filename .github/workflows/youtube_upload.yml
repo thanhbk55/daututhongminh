@@ -3,9 +3,6 @@ name: YouTube Upload
 on:
   workflow_dispatch:
     inputs:
-      sheet_row:
-        description: "Row number in sheet aaa1 (e.g. 2)"
-        required: true
       yt_privacy:
         description: "private|unlisted|public"
         required: false
@@ -15,11 +12,19 @@ on:
         required: false
         default: "normal"
 
+env:
+  SPREADSHEET_ID: "1b2quaeYZP2BNFKKrW5pMlO75NSA-IzVs04PZkLEZCHo"
+  SHEET_NAME: "aaa1"
+  POINTER_CELL: "W2"
+  GDRIVE_FOLDER_ID: "1gQdENPC3hXdTrKLXzhigQw47zh3J9U6h"
+  OUT_PATH: "out/video.mp4"
+
 jobs:
   prepare:
     runs-on: ubuntu-latest
     outputs:
       should_run: ${{ steps.sheet.outputs.should_run }}
+      should_advance: ${{ steps.sheet.outputs.should_advance }}
       sheet_row: ${{ steps.sheet.outputs.sheet_row }}
       gdrive_rel_path: ${{ steps.sheet.outputs.gdrive_rel_path }}
       yt_title: ${{ steps.sheet.outputs.yt_title }}
@@ -40,10 +45,9 @@ jobs:
       - name: Install deps
         run: npm i googleapis@^140
 
-      - name: Read row from Google Sheet
+      - name: Read current row from Google Sheet pointer
         id: sheet
         env:
-          SHEET_ROW: ${{ inputs.sheet_row }}
           VIDEO_MODE: ${{ inputs.video_mode }}
           YT_PRIVACY_INPUT: ${{ inputs.yt_privacy }}
         run: |
@@ -60,16 +64,19 @@ jobs:
             const clientId = process.env.GOOGLE_CLIENT_ID;
             const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
             const refreshToken = process.env.GOOGLE_REFRESH_TOKEN;
-            const rowNumber = String(process.env.SHEET_ROW || "").trim();
+            const spreadsheetId = process.env.SPREADSHEET_ID;
+            const sheetName = process.env.SHEET_NAME;
+            const pointerCell = process.env.POINTER_CELL;
             const videoMode = String(process.env.VIDEO_MODE || "normal").trim().toLowerCase();
             const ytPrivacy = String(process.env.YT_PRIVACY_INPUT || "private").trim().toLowerCase();
 
             if (!clientId || !clientSecret || !refreshToken) {
               throw new Error("Missing GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET / GOOGLE_REFRESH_TOKEN");
             }
-            if (!rowNumber) throw new Error("Missing sheet_row input");
-            if (!/^\d+$/.test(rowNumber)) throw new Error(`Invalid sheet_row: ${rowNumber}`);
-            if (Number(rowNumber) < 1) throw new Error(`sheet_row must be >= 1: ${rowNumber}`);
+            if (!spreadsheetId) throw new Error("Missing SPREADSHEET_ID");
+            if (!sheetName) throw new Error("Missing SHEET_NAME");
+            if (!pointerCell) throw new Error("Missing POINTER_CELL");
+
             if (!["normal", "short"].includes(videoMode)) {
               throw new Error(`Invalid video_mode: ${videoMode}`);
             }
@@ -81,15 +88,31 @@ jobs:
             oauth2.setCredentials({ refresh_token: refreshToken });
 
             const sheets = google.sheets({ version: "v4", auth: oauth2 });
-            const spreadsheetId = "1b2quaeYZP2BNFKKrW5pMlO75NSA-IzVs04PZkLEZCHo";
-            const range = `aaa1!A${rowNumber}:P${rowNumber}`;
 
-            const res = await sheets.spreadsheets.values.get({
+            // Read pointer from fixed cell W2
+            const pointerRes = await sheets.spreadsheets.values.get({
               spreadsheetId,
-              range,
+              range: `${sheetName}!${pointerCell}`,
             });
 
-            const row = res.data.values?.[0];
+            const rowNumber = String(pointerRes.data.values?.[0]?.[0] || "").trim();
+            if (!rowNumber) {
+              throw new Error(`Pointer cell ${sheetName}!${pointerCell} is empty`);
+            }
+            if (!/^\d+$/.test(rowNumber)) {
+              throw new Error(`Invalid row number in ${sheetName}!${pointerCell}: ${rowNumber}`);
+            }
+            if (Number(rowNumber) < 1) {
+              throw new Error(`Row number in ${sheetName}!${pointerCell} must be >= 1: ${rowNumber}`);
+            }
+
+            const rowRange = `${sheetName}!A${rowNumber}:P${rowNumber}`;
+            const rowRes = await sheets.spreadsheets.values.get({
+              spreadsheetId,
+              range: rowRange,
+            });
+
+            const row = rowRes.data.values?.[0];
             if (!row) {
               throw new Error(`No data found at row ${rowNumber}`);
             }
@@ -100,9 +123,22 @@ jobs:
             const hashtag = String(row[3] || "").trim();     // D
             const status = String(row[15] || "").trim();     // P
 
+            if (status === "SKIP") {
+              console.log(`Skip row ${rowNumber}: status is SKIP, will advance pointer`);
+              setOutput("should_run", "false");
+              setOutput("should_advance", "true");
+              setOutput("sheet_row", rowNumber);
+              setOutput("gdrive_rel_path", "");
+              setOutput("yt_title", "");
+              setOutput("yt_description", "");
+              setOutput("yt_privacy", ytPrivacy);
+              return;
+            }
+
             if (status !== "REVIEW OK") {
               console.log(`Skip row ${rowNumber}: status is "${status}", expected "REVIEW OK"`);
               setOutput("should_run", "false");
+              setOutput("should_advance", "false");
               setOutput("sheet_row", rowNumber);
               setOutput("gdrive_rel_path", "");
               setOutput("yt_title", "");
@@ -123,13 +159,14 @@ jobs:
             const ytDescription = [desc, hashtag].filter(Boolean).join("\n\n");
 
             setOutput("should_run", "true");
+            setOutput("should_advance", "false");
             setOutput("sheet_row", rowNumber);
             setOutput("gdrive_rel_path", gdriveRelPath);
             setOutput("yt_title", ytTitle);
             setOutput("yt_description", ytDescription);
             setOutput("yt_privacy", ytPrivacy);
 
-            console.log("Read sheet row OK:", rowNumber);
+            console.log("Pointer row:", rowNumber);
             console.log("video_mode:", videoMode);
             console.log("gdrive_rel_path:", gdriveRelPath);
             console.log("yt_title:", ytTitle);
@@ -150,9 +187,6 @@ jobs:
       GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
       GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
       GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
-
-      GDRIVE_FOLDER_ID: "1gQdENPC3hXdTrKLXzhigQw47zh3J9U6h"
-      OUT_PATH: "out/video.mp4"
 
     steps:
       - name: Checkout
@@ -387,7 +421,7 @@ jobs:
           });
           NODE
 
-      - name: Update Google Sheet (P=row => YOUTUBE DONE, W=row => URL)
+      - name: Update Google Sheet after upload
         env:
           GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
           GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
@@ -401,6 +435,9 @@ jobs:
             const clientId = process.env.GOOGLE_CLIENT_ID;
             const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
             const refreshToken = process.env.GOOGLE_REFRESH_TOKEN;
+            const spreadsheetId = process.env.SPREADSHEET_ID;
+            const sheetName = process.env.SHEET_NAME;
+            const pointerCell = process.env.POINTER_CELL;
             const row = String(process.env.SHEET_ROW || "").trim();
             const videoUrl = String(process.env.VIDEO_URL || "").trim();
 
@@ -411,7 +448,14 @@ jobs:
             oauth2.setCredentials({ refresh_token: refreshToken });
 
             const sheets = google.sheets({ version: "v4", auth: oauth2 });
-            const spreadsheetId = "1b2quaeYZP2BNFKKrW5pMlO75NSA-IzVs04PZkLEZCHo";
+
+            const pointerRes = await sheets.spreadsheets.values.get({
+              spreadsheetId,
+              range: `${sheetName}!${pointerCell}`,
+            });
+
+            const currentPointer = Number(pointerRes.data.values?.[0]?.[0] || 0);
+            const nextPointer = currentPointer + 1;
 
             await sheets.spreadsheets.values.batchUpdate({
               spreadsheetId,
@@ -419,18 +463,84 @@ jobs:
                 valueInputOption: "RAW",
                 data: [
                   {
-                    range: `aaa1!P${row}`,
+                    range: `${sheetName}!P${row}`,
                     values: [["YOUTUBE DONE"]],
                   },
                   {
-                    range: `aaa1!W${row}`,
+                    range: `${sheetName}!W${row}`,
                     values: [[videoUrl]],
+                  },
+                  {
+                    range: `${sheetName}!${pointerCell}`,
+                    values: [[nextPointer]],
                   },
                 ],
               },
             });
 
-            console.log(`Sheet updated: P${row}=YOUTUBE DONE, W${row}=${videoUrl}`);
+            console.log(`Sheet updated: P${row}=YOUTUBE DONE, W${row}=${videoUrl}, ${pointerCell}=${nextPointer}`);
+          }
+
+          main().catch((e) => {
+            console.error(e.response?.data || e);
+            process.exit(1);
+          });
+          NODE
+
+  skip_and_advance:
+    runs-on: ubuntu-latest
+    needs: prepare
+    if: ${{ needs.prepare.outputs.should_run != 'true' && needs.prepare.outputs.should_advance == 'true' }}
+
+    env:
+      GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+      GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+      GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+
+    steps:
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install deps
+        run: npm i googleapis@^140
+
+      - name: Advance pointer because status is SKIP
+        run: |
+          node <<'NODE'
+          const { google } = require("googleapis");
+
+          async function main() {
+            const oauth2 = new google.auth.OAuth2(
+              process.env.GOOGLE_CLIENT_ID,
+              process.env.GOOGLE_CLIENT_SECRET
+            );
+            oauth2.setCredentials({ refresh_token: process.env.GOOGLE_REFRESH_TOKEN });
+
+            const sheets = google.sheets({ version: "v4", auth: oauth2 });
+            const spreadsheetId = process.env.SPREADSHEET_ID;
+            const sheetName = process.env.SHEET_NAME;
+            const pointerCell = process.env.POINTER_CELL;
+
+            const pointerRes = await sheets.spreadsheets.values.get({
+              spreadsheetId,
+              range: `${sheetName}!${pointerCell}`,
+            });
+
+            const currentPointer = Number(pointerRes.data.values?.[0]?.[0] || 0);
+            const nextPointer = currentPointer + 1;
+
+            await sheets.spreadsheets.values.update({
+              spreadsheetId,
+              range: `${sheetName}!${pointerCell}`,
+              valueInputOption: "RAW",
+              requestBody: {
+                values: [[nextPointer]],
+              },
+            });
+
+            console.log(`Status is SKIP, advanced ${pointerCell} from ${currentPointer} to ${nextPointer}`);
           }
 
           main().catch((e) => {
@@ -442,7 +552,7 @@ jobs:
   skipped:
     runs-on: ubuntu-latest
     needs: prepare
-    if: ${{ needs.prepare.outputs.should_run != 'true' }}
+    if: ${{ needs.prepare.outputs.should_run != 'true' && needs.prepare.outputs.should_advance != 'true' }}
     steps:
       - name: Skip message
-        run: echo "Skipped because column P is not REVIEW OK"
+        run: echo "Skipped because current row status is not REVIEW OK"
