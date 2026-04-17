@@ -135,8 +135,8 @@ jobs:
               return;
             }
 
-            if (status !== "REVIEW OK") {
-              console.log(`Skip row ${rowNumber}: status is "${status}", expected "REVIEW OK"`);
+            if (status !== "YOUTUBE OK") {
+              console.log(`Skip row ${rowNumber}: status is "${status}", expected "YOUTUBE OK"`);
               setOutput("should_run", "false");
               setOutput("should_advance", "false");
               setOutput("sheet_row", rowNumber);
