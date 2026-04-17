@@ -26,9 +26,9 @@ jobs:
     runs-on: ubuntu-latest
     env:
       # OAuth để tải Drive (refresh token cần drive.readonly scope)
-      GOOGLE_CLIENT_ID: ${{ secrets.YT_CLIENT_ID }}
-      GOOGLE_CLIENT_SECRET: ${{ secrets.YT_CLIENT_SECRET }}
-      GOOGLE_REFRESH_TOKEN: ${{ secrets.YT_REFRESH_TOKEN }}
+      GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+      GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+      GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
 
       GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
       OUT_PATH: "out/video.mp4"
@@ -193,9 +193,9 @@ jobs:
 
       - name: Upload to YouTube (Node stream, no OOM)
         env:
-          YT_CLIENT_ID: ${{ secrets.YT_CLIENT_ID }}
-          YT_CLIENT_SECRET: ${{ secrets.YT_CLIENT_SECRET }}
-          YT_REFRESH_TOKEN: ${{ secrets.YT_REFRESH_TOKEN }}
+          YT_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          YT_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          YT_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
 
           YT_TITLE: ${{ inputs.yt_title }}
           YT_DESCRIPTION: ${{ inputs.yt_description }}
