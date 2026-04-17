@@ -30,7 +30,7 @@ jobs:
       GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
       GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
 
-      GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
+      GDRIVE_FOLDER_ID: "1gQdENPC3hXdTrKLXzhigQw47zh3J9U6h"
       OUT_PATH: "out/video.mp4"
 
     steps:
